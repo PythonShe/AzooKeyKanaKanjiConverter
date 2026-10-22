@@ -8,6 +8,13 @@ package final class DicdataStoreState {
 
     var keyboardLanguage: KeyboardLanguage = .ja_JP
     private(set) var dynamicUserDictionary: [DicdataElement] = []
+    private(set) var additionalRoman2KanaTypoRules: [Roman2KanaTypoRule] = []
+    /// The typo corrections with typo correction on: the built-in ones and
+    /// the additional rules.
+    private(set) var typoCorrectionTable: TypoCorrectionGenerator.Table = .builtIn
+    /// The typo corrections with typo correction off: the additional rules
+    /// alone, or nil without any.
+    private(set) var additionalTypoCorrectionTable: TypoCorrectionGenerator.Table?
     var learningMemoryManager: LearningManager
 
     var userDictionaryURL: URL?
@@ -69,6 +76,19 @@ package final class DicdataStoreState {
         self.updateUserDictionaryURL(options.sharedContainerURL)
         let learningConfig = LearningConfig(learningType: options.learningType, maxMemoryCount: options.maxMemoryCount, memoryURL: options.memoryDirectoryURL)
         self.updateLearningConfig(learningConfig)
+    }
+
+    /// Sets the romaji corrections offered in addition to the built-in ones.
+    /// - Returns: whether the rules changed.
+    @discardableResult
+    func updateAdditionalRoman2KanaTypoRules(_ rules: [Roman2KanaTypoRule]) -> Bool {
+        guard rules != self.additionalRoman2KanaTypoRules else {
+            return false
+        }
+        self.additionalRoman2KanaTypoRules = rules
+        self.typoCorrectionTable = TypoCorrectionGenerator.Table.builtIn.adding(rules)
+        self.additionalTypoCorrectionTable = rules.isEmpty ? nil : TypoCorrectionGenerator.Table.identity.adding(rules)
+        return true
     }
 
     func importDynamicUserDictionary(_ dicdata: [DicdataElement]) {

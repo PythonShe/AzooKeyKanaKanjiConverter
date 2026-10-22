@@ -215,6 +215,79 @@ final class DicdataStoreTests: XCTestCase {
         }
     }
 
+    /// Words ending at the end of `input`, typed in romaji and finished with a
+    /// composition separator, as an input method does on conversion.
+    private func wordsEnding(_ input: String, dicdataStore: DicdataStore, state: DicdataStoreState, needTypoCorrection: Bool) -> [DicdataElement] {
+        var c = ComposingText()
+        c.insertAtCursorPosition(input, inputStyle: .roman2kana)
+        c.insertAtCursorPosition([.init(piece: .compositionSeparator, inputStyle: .roman2kana)])
+        return dicdataStore.lookupDicdata(
+            composingText: c,
+            inputRange: (0, c.input.endIndex - 1 ..< c.input.endIndex),
+            surfaceRange: (0, c.convertTarget.count - 1 ..< c.convertTarget.count),
+            needTypoCorrection: needTypoCorrection,
+            state: state
+        ).map(\.data)
+    }
+
+    func testAdditionalRoman2KanaTypoRules() throws {
+        let dicdataStore = DicdataStore.withDefaultDictionary()
+        let state = dicdataStore.prepareState()
+        XCTAssertFalse(wordsEnding("genin", dicdataStore: dicdataStore, state: state, needTypoCorrection: false).contains { $0.word == "原因" })
+
+        // A correction longer than what was typed, through the trailing separator
+        state.updateAdditionalRoman2KanaTypoRules([.init(typed: "n", intended: "nn", weight: 3.5)])
+        for needTypoCorrection in [false, true] {
+            let corrected = try XCTUnwrap(wordsEnding("genin", dicdataStore: dicdataStore, state: state, needTypoCorrection: needTypoCorrection).filter { $0.word == "原因" }.map { $0.value() }.max())
+            let typed = try XCTUnwrap(wordsEnding("gennin", dicdataStore: dicdataStore, state: state, needTypoCorrection: needTypoCorrection).filter { $0.word == "原因" }.map { $0.value() }.max())
+            // The correction's penalty applies to the word
+            XCTAssertLessThan(corrected, typed)
+            // The reading as typed stays
+            XCTAssertTrue(wordsEnding("genin", dicdataStore: dicdataStore, state: state, needTypoCorrection: needTypoCorrection).contains { $0.ruby == "ゲニン" })
+        }
+
+        state.updateAdditionalRoman2KanaTypoRules([])
+        XCTAssertFalse(wordsEnding("genin", dicdataStore: dicdataStore, state: state, needTypoCorrection: false).contains { $0.word == "原因" })
+    }
+
+    /// A correction of the last element before a word lets the word start
+    /// there, and a reading that the correction ends earlier ends there as
+    /// well: with n read as nn, "hokenni" is ほけん|に.
+    func testCorrectionMovesWordBoundary() throws {
+        let dicdataStore = DicdataStore.withDefaultDictionary()
+        let state = dicdataStore.prepareState()
+        state.updateAdditionalRoman2KanaTypoRules([.init(typed: "n", intended: "nn", weight: 3.5)])
+        var c = ComposingText()
+        c.insertAtCursorPosition("hokenni", inputStyle: .roman2kana)
+        let fromStart = dicdataStore.lookupDicdata(composingText: c, inputRange: (0, nil), needTypoCorrection: false, state: state)
+        // 保険 as typed with nn, and read from a single n
+        XCTAssertTrue(fromStart.contains { $0.data.word == "保険" && $0.range == .input(from: 0, to: 6) && $0.data.adjust.isZero })
+        XCTAssertTrue(fromStart.contains { $0.data.word == "保険" && $0.range == .input(from: 0, to: 5) && $0.data.adjust < 0 })
+        let afterIt = dicdataStore.lookupDicdata(composingText: c, inputRange: (5, nil), needTypoCorrection: false, state: state)
+        XCTAssertTrue(afterIt.contains { $0.data.word == "に" })
+        // Without the rule no word starts inside nn
+        state.updateAdditionalRoman2KanaTypoRules([])
+        XCTAssertFalse(dicdataStore.lookupDicdata(composingText: c, inputRange: (5, nil), needTypoCorrection: false, state: state).contains { $0.data.word == "に" })
+    }
+
+    /// A word whose last n the next consonant reads as ん ends before it.
+    func testCorrectionEndsBeforeConsonant() throws {
+        let dicdataStore = DicdataStore.withDefaultDictionary()
+        let state = dicdataStore.prepareState()
+        state.updateAdditionalRoman2KanaTypoRules([.init(typed: "n", intended: "nn", weight: 3.5)])
+        var c = ComposingText()
+        c.insertAtCursorPosition("senendesu", inputStyle: .roman2kana)
+        let words = dicdataStore.lookupDicdata(composingText: c, inputRange: (0, nil), needTypoCorrection: false, state: state)
+        XCTAssertTrue(words.contains { $0.data.word == "千円" && $0.range == .input(from: 0, to: 5) })
+    }
+
+    func testTypoCorrectionThroughCompositionSeparator() throws {
+        let dicdataStore = DicdataStore.withDefaultDictionary()
+        // ts -> タ, with the input finished by a separator
+        let words = wordsEnding("tskamatsu", dicdataStore: dicdataStore, state: dicdataStore.prepareState(), needTypoCorrection: true)
+        XCTAssertTrue(words.contains { $0.word == "高松" })
+    }
+
     func testLookupDicdata() throws {
         let dicdataStore = DicdataStore.withDefaultDictionary()
         do {

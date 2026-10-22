@@ -1,7 +1,28 @@
 import SwiftUtils
 
+/// A romaji spelling that the converter may also read as another, at a
+/// penalty, in addition to the built-in typo corrections.
+///
+/// For example, `Roman2KanaTypoRule(typed: "ni", intended: "nni")` lets
+/// "genin" be read as げんいん as well as げにん.
+public struct Roman2KanaTypoRule: Sendable, Hashable {
+    public init(typed: String, intended: String, weight: PValue = 3.5) {
+        self.typed = typed
+        self.intended = intended
+        self.weight = weight
+    }
+
+    /// The typed romaji, at least one character.
+    public var typed: String
+    /// The romaji it may stand for; it may be longer or shorter than `typed`.
+    public var intended: String
+    /// The penalty of reading `typed` as `intended`, in the units of the
+    /// built-in corrections, which mostly weigh 3.5.
+    public var weight: PValue
+}
+
 struct TypoCorrectionGenerator: Sendable {
-    init(inputs: [ComposingText.InputElement], range: ProcessRange) {
+    init(inputs: [ComposingText.InputElement], range: ProcessRange, table: Table = .builtIn) {
         self.maxPenalty = 3.5 * 3
         self.inputs = inputs
         self.range = range
@@ -9,36 +30,59 @@ struct TypoCorrectionGenerator: Sendable {
         let count = self.range.rightIndexRange.endIndex - range.leftIndex
         self.count = count
         self.nodes = (0..<count).map {(i: Int) in
-            Self.lengths.flatMap {(k: Int) -> [TypoCandidate] in
+            (0 ..< table.maxKeyLength).flatMap {(k: Int) -> [TypoCandidate] in
                 let j = i + k
                 if count <= j {
                     return []
                 }
-                return Self.getTypo(inputs[range.leftIndex + i ... range.leftIndex + j])
+                return table.candidates(for: inputs[range.leftIndex + i ... range.leftIndex + j])
             }
         }
         // 深さ優先で列挙する
-        var leftConvertTargetElements: [ComposingText.ConvertTargetElement] = []
-        for element in inputs[0 ..< range.leftIndex] {
-            ComposingText.updateConvertTargetElements(currentElements: &leftConvertTargetElements, newElement: element)
+        // The input before the range as typed, and as each correction of its
+        // last element reads it: a word may start where a corrected reading
+        // of the left ends cleanly (with n read as nn, "hokenni" is ほけん|に).
+        // The word to the left carries that correction's penalty.
+        var leftContexts: [[ComposingText.ConvertTargetElement]] = []
+        do {
+            var leftElements: [ComposingText.ConvertTargetElement] = []
+            for element in inputs[0 ..< max(0, range.leftIndex - 1)] {
+                ComposingText.updateConvertTargetElements(currentElements: &leftElements, newElement: element)
+            }
+            if range.leftIndex > 0 {
+                var typed = leftElements
+                ComposingText.updateConvertTargetElements(currentElements: &typed, newElement: inputs[range.leftIndex - 1])
+                leftContexts.append(typed)
+                for correction in table.candidates(for: inputs[range.leftIndex - 1 ... range.leftIndex - 1]) where !correction.weight.isZero {
+                    var corrected = leftElements
+                    for element in correction.inputElements {
+                        ComposingText.updateConvertTargetElements(currentElements: &corrected, newElement: element)
+                    }
+                    leftContexts.append(corrected)
+                }
+            } else {
+                leftContexts.append(leftElements)
+            }
         }
-        let actualLeftConvertTarget = leftConvertTargetElements.reduce(into: "") { $0 += $1.string}
 
         self.stack = nodes[0].compactMap { typoCandidate in
             var convertTargetElements = [ComposingText.ConvertTargetElement]()
-            var fullConvertTargetElements = leftConvertTargetElements
             for element in typoCandidate.inputElements {
                 ComposingText.updateConvertTargetElements(currentElements: &convertTargetElements, newElement: element)
-                ComposingText.updateConvertTargetElements(currentElements: &fullConvertTargetElements, newElement: element)
             }
-            let fullConvertTarget = fullConvertTargetElements.reduce(into: "") { $0 += $1.string}
             let convertTarget = convertTargetElements.reduce(into: "") { $0 += $1.string}
-
-            if fullConvertTarget == actualLeftConvertTarget + convertTarget {
-                return (convertTargetElements, typoCandidate.inputElements.count, typoCandidate.weight)
-            } else {
-                return nil
+            for leftConvertTargetElements in leftContexts {
+                var fullConvertTargetElements = leftConvertTargetElements
+                for element in typoCandidate.inputElements {
+                    ComposingText.updateConvertTargetElements(currentElements: &fullConvertTargetElements, newElement: element)
+                }
+                let fullConvertTarget = fullConvertTargetElements.reduce(into: "") { $0 += $1.string}
+                let actualLeftConvertTarget = leftConvertTargetElements.reduce(into: "") { $0 += $1.string}
+                if fullConvertTarget == actualLeftConvertTarget + convertTarget {
+                    return (convertTargetElements, typoCandidate.consumedCount, typoCandidate.weight)
+                }
             }
+            return nil
         }
     }
 
@@ -87,6 +131,33 @@ struct TypoCorrectionGenerator: Sendable {
             }
             return true
         }
+    }
+
+    /// The reading of `elements` as the next element finishes its pending
+    /// tail without joining it, as a consonant after n reads the n as ん:
+    /// the elements may end a word there. Nil when the next element joins
+    /// the tail (n then a reads な) or leaves it as it is.
+    private static func finished(
+        _ elements: [ComposingText.ConvertTargetElement],
+        by nextElement: ComposingText.InputElement,
+        giving newElements: [ComposingText.ConvertTargetElement]
+    ) -> [Character]? {
+        var alone: [ComposingText.ConvertTargetElement] = []
+        ComposingText.updateConvertTargetElements(currentElements: &alone, newElement: nextElement)
+        let tail = alone.reduce(into: "") { $0 += $1.string }
+        let new = newElements.reduce(into: "") { $0 += $1.string }
+        let old = elements.reduce(into: "") { $0 += $1.string }
+        guard !old.isEmpty, new.hasSuffix(tail) else {
+            return nil
+        }
+        let finished = new.dropLast(tail.count)
+        // Only the pending last character changes; a doubled consonant read
+        // as っ belongs with the syllable after it (tukat|t is no word end)
+        guard finished.count == old.count, finished.dropLast() == old.dropLast(), finished.last != old.last,
+              finished.last != "っ" else {
+            return nil
+        }
+        return finished.map { $0.toKatakana() }
     }
 
     /// `target`で始まる場合は到達不可能であることを知らせる
@@ -167,10 +238,13 @@ struct TypoCorrectionGenerator: Sendable {
             if self.range.rightIndexRange.contains(count + self.range.leftIndex - 1) {
                 let originalConvertTarget = convertTargetElements.reduce(into: []) { $0 += $1.string.map { $0.toKatakana() } }
                 if self.range.leftIndex + count < self.inputs.endIndex {
+                    let nextElement = inputs[self.range.leftIndex + count]
                     var newConvertTargetElements = convertTargetElements
-                    ComposingText.updateConvertTargetElements(currentElements: &newConvertTargetElements, newElement: inputs[self.range.leftIndex + count])
+                    ComposingText.updateConvertTargetElements(currentElements: &newConvertTargetElements, newElement: nextElement)
                     if Self.check(convertTargetElements, isPrefixOf: newConvertTargetElements) {
                         result = (originalConvertTarget, (.input(count + self.range.leftIndex - 1), penalty))
+                    } else if let finished = Self.finished(convertTargetElements, by: nextElement, giving: newConvertTargetElements) {
+                        result = (finished, (.input(count + self.range.leftIndex - 1), penalty))
                     }
                 } else {
                     result = (originalConvertTarget, (.input(count + self.range.leftIndex - 1), penalty))
@@ -206,14 +280,14 @@ struct TypoCorrectionGenerator: Sendable {
                 stack.append((convertTargetElements, count + 1, penalty))
             } else {
                 // ノード数は高々1, 2なので、for loopを回す方が効率が良い
-                for node in self.nodes[count] where count + node.inputElements.count <= self.nodes.endIndex {
+                for node in self.nodes[count] where count + node.consumedCount <= self.nodes.endIndex {
                     var convertTargetElements = convertTargetElements
                     for element in node.inputElements {
                         ComposingText.updateConvertTargetElements(currentElements: &convertTargetElements, newElement: element)
                     }
                     stack.append((
                         convertTargetElements: convertTargetElements,
-                        count: count + node.inputElements.count,
+                        count: count + node.consumedCount,
                         penalty: penalty + node.weight
                     ))
                 }
@@ -233,65 +307,115 @@ struct TypoCorrectionGenerator: Sendable {
         case other
     }
 
-    private static func getTypo(_ elements: some Collection<ComposingText.InputElement>) -> [TypoCandidate] {
-        guard !elements.isEmpty else {
-            return []
-        }
-        lazy var key = elements.reduce(into: "") {
-            switch $1.piece {
-            case let .character(c), .key(intention: let c?, modifiers: _):
-                $0.append(c.toKatakana())
-            case _:
-                break
-            }
+    struct TypoCandidate: Sendable, Equatable {
+        init(inputElements: [ComposingText.InputElement], weight: PValue, consumedCount: Int? = nil) {
+            self.inputElements = inputElements
+            self.weight = weight
+            self.consumedCount = consumedCount ?? inputElements.count
         }
 
-        let inputStylesType = elements.reduce(InputStylesType.none) { (result, element) in
-            switch (result, element.inputStyle) {
-            case (.other, _): .other
-            case (.onlyDirect, .direct): .onlyDirect
-            case (.onlyDirect, _): .other
-            case (.onlyRoman2KanaCompatible, .roman2kana), (.onlyRoman2KanaCompatible, .mapped(id: .defaultRomanToKana)): .onlyRoman2KanaCompatible
-            case (.onlyRoman2KanaCompatible, _): .other
-            case (.none, .direct): .onlyDirect
-            case (.none, .roman2kana), (.none, .mapped(id: .defaultRomanToKana)): .onlyRoman2KanaCompatible
-            case (.none, _): .other
+        var inputElements: [ComposingText.InputElement]
+        var weight: PValue
+        /// The number of typed input elements this candidate stands for,
+        /// which differs from `inputElements.count` when a correction is
+        /// longer or shorter than what was typed.
+        var consumedCount: Int
+    }
+
+    /// The corrections the generator may offer, by the typed key.
+    struct Table: Sendable {
+        var direct: [String: [TypoCandidate]]
+        var roman2Kana: [String: [TypoCandidate]]
+        /// The longest key, in input elements.
+        var maxKeyLength: Int
+
+        static let builtIn = Table(direct: directPossibleTypo, roman2Kana: roman2KanaPossibleTypo, maxKeyLength: 2)
+
+        /// No corrections: the generator offers the input as it is.
+        static let identity = Table(direct: [:], roman2Kana: [:], maxKeyLength: 1)
+
+        /// This table with `rules` added to its romaji corrections.
+        func adding(_ rules: [Roman2KanaTypoRule]) -> Table {
+            var table = self
+            for rule in rules where !rule.typed.isEmpty && !rule.intended.isEmpty {
+                let key = String(rule.typed.map { $0.toKatakana() })
+                table.roman2Kana[key, default: []].append(TypoCandidate(
+                    inputElements: rule.intended.map { ComposingText.InputElement(piece: .character($0), inputStyle: .roman2kana) },
+                    weight: rule.weight,
+                    consumedCount: key.count
+                ))
+                table.maxKeyLength = max(table.maxKeyLength, key.count)
             }
+            return table
         }
-        switch inputStylesType {
-        case .onlyDirect:
-            let dictionary: [String: [TypoCandidate]] = Self.directPossibleTypo
-            if key.count == 1 {
-                var result = dictionary[key, default: []]
-                // そのまま
-                result.append(TypoCandidate(inputElements: key.map {.init(character: $0, inputStyle: .direct)}, weight: 0))
-                return result
-            } else {
-                return dictionary[key, default: []]
+
+        func candidates(for elements: some Collection<ComposingText.InputElement>) -> [TypoCandidate] {
+            guard !elements.isEmpty else {
+                return []
             }
-        case .onlyRoman2KanaCompatible:
-            let dictionary: [String: [TypoCandidate]] = Self.roman2KanaPossibleTypo
-            if key.count == 1 {
-                var result = dictionary[key, default: []]
-                // そのまま
-                result.append(TypoCandidate(inputElements: key.map {.init(character: $0, inputStyle: .roman2kana)}, weight: 0))
-                return result
-            } else {
-                return dictionary[key, default: []]
+            // A piece that is not a character, such as a composition separator,
+            // has no corrections: it passes through as it is, on its own.
+            let isCharacter: (ComposingText.InputElement) -> Bool = {
+                switch $0.piece {
+                case .character, .key(intention: _?, modifiers: _): true
+                case _: false
+                }
             }
-        case .none, .other:
-            // `.mapped`や、混ざっているケースでここに到達する
-            return if elements.count == 1 {
-                [
-                    TypoCandidate(inputElements: [elements.first!], weight: 0)
-                ]
-            } else {
-                []
+            if !elements.allSatisfy(isCharacter) {
+                return elements.count == 1 ? [TypoCandidate(inputElements: Array(elements), weight: 0)] : []
+            }
+            let key = elements.reduce(into: "") {
+                switch $1.piece {
+                case let .character(c), .key(intention: let c?, modifiers: _):
+                    $0.append(c.toKatakana())
+                case _:
+                    break
+                }
+            }
+
+            let inputStylesType = elements.reduce(InputStylesType.none) { (result, element) in
+                switch (result, element.inputStyle) {
+                case (.other, _): .other
+                case (.onlyDirect, .direct): .onlyDirect
+                case (.onlyDirect, _): .other
+                case (.onlyRoman2KanaCompatible, .roman2kana), (.onlyRoman2KanaCompatible, .mapped(id: .defaultRomanToKana)): .onlyRoman2KanaCompatible
+                case (.onlyRoman2KanaCompatible, _): .other
+                case (.none, .direct): .onlyDirect
+                case (.none, .roman2kana), (.none, .mapped(id: .defaultRomanToKana)): .onlyRoman2KanaCompatible
+                case (.none, _): .other
+                }
+            }
+            switch inputStylesType {
+            case .onlyDirect:
+                if key.count == 1 {
+                    var result = self.direct[key, default: []]
+                    // そのまま
+                    result.append(TypoCandidate(inputElements: key.map {.init(character: $0, inputStyle: .direct)}, weight: 0))
+                    return result
+                } else {
+                    return self.direct[key, default: []]
+                }
+            case .onlyRoman2KanaCompatible:
+                if key.count == 1 {
+                    var result = self.roman2Kana[key, default: []]
+                    // そのまま
+                    result.append(TypoCandidate(inputElements: key.map {.init(character: $0, inputStyle: .roman2kana)}, weight: 0))
+                    return result
+                } else {
+                    return self.roman2Kana[key, default: []]
+                }
+            case .none, .other:
+                // `.mapped`や、混ざっているケースでここに到達する
+                return if elements.count == 1 {
+                    [
+                        TypoCandidate(inputElements: [elements.first!], weight: 0)
+                    ]
+                } else {
+                    []
+                }
             }
         }
     }
-
-    fileprivate static let lengths = [0, 1]
 
     private struct TypoUnit: Equatable {
         var value: String
@@ -301,11 +425,6 @@ struct TypoCorrectionGenerator: Sendable {
             self.value = value
             self.weight = weight
         }
-    }
-
-    struct TypoCandidate: Sendable, Equatable {
-        var inputElements: [ComposingText.InputElement]
-        var weight: PValue
     }
 
     /// ダイレクト入力用

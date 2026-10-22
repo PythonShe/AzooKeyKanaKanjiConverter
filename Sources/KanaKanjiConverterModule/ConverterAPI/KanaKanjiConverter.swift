@@ -124,6 +124,16 @@ public final class KanaKanjiConverter {
         self.dicdataStoreState.importDynamicUserDictionary(dicdata)
     }
 
+    /// Adds romaji corrections to the built-in ones. Unlike those, they apply
+    /// whether or not `ConvertRequestOptions.needTypoCorrection` is on, since
+    /// the caller asked for them; an empty array removes them.
+    public func setAdditionalRoman2KanaTypoRules(_ rules: [Roman2KanaTypoRule]) {
+        if self.dicdataStoreState.updateAdditionalRoman2KanaTypoRules(rules) {
+            // The lattice was built with the previous rules
+            self.stopComposition()
+        }
+    }
+
     public func updateUserDictionaryURL(_ newURL: URL) {
         self.dicdataStoreState.updateUserDictionaryURL(newURL)
     }

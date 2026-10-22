@@ -296,7 +296,7 @@ public final class DicdataStore {
         needTypoCorrection: Bool,
         state: DicdataStoreState
     ) -> (
-        stringToInfo: [[Character]: (endIndex: Lattice.LatticeIndex, penalty: PValue)],
+        stringToInfo: [[Character]: [(endIndex: Lattice.LatticeIndex, penalty: PValue)]],
         indices: [(key: String, indices: [Int])],
         temporaryMemoryDicdata: [DicdataElement]
     ) {
@@ -308,18 +308,25 @@ public final class DicdataStore {
             )
             generator.register(surfaceGenerator)
         }
-        // Register TypoCorrectionGenerator only when typo correction is enabled
-        if let inputProcessRange, needTypoCorrection {
+        // Register TypoCorrectionGenerator when typo correction is enabled, or
+        // when the caller added romaji corrections, which apply either way
+        let typoCorrectionTable = needTypoCorrection ? state.typoCorrectionTable : state.additionalTypoCorrectionTable
+        if let inputProcessRange, let typoCorrectionTable {
             let typoCorrectionGenerator = TypoCorrectionGenerator(
                 inputs: composingText.input,
-                range: inputProcessRange
+                range: inputProcessRange,
+                table: typoCorrectionTable
             )
             generator.register(typoCorrectionGenerator)
         }
         var targetLOUDS: [String: LOUDS.MovingTowardPrefixSearchHelper] = [:]
         var stringToInfo: [([Character], (endIndex: Lattice.LatticeIndex, penalty: PValue))] = []
         // 動的辞書（一時学習データ、動的ユーザ辞書）から取り出されたデータ
+        // Taken once per reading, as found; `lookupDicdata` penalizes them
+        // per path like the dictionary's words.
         var dynamicDicdata: [Int: [DicdataElement]] = [:]
+        var dynamicallySearched: Set<[Character]> = []
+        var matchedStrings: Set<[Character]> = []
         // ジェネレータを舐める
         while let (characters, info) = generator.next() {
             guard let firstCharacter = characters.first else {
@@ -350,18 +357,10 @@ public final class DicdataStore {
             let result = state.learningMemoryManager.movingTowardPrefixSearchOnTemporaryMemory(charIDs: consume charIDs)
             updated = updated || !(result.dicdata.isEmpty)
             availableMaxIndex = max(availableMaxIndex, result.availableMaxIndex)
-            for (depth, dicdata) in result.dicdata {
-                for data in dicdata {
-                    if info.penalty.isZero {
-                        dynamicDicdata[depth, default: []].append(data)
-                    }
-                    let ratio = Self.penaltyRatio[data.lcid]
-                    let pUnit: PValue = Self.getPenalty(data: data) / 2   // 負の値
-                    let adjust = pUnit * info.penalty * ratio
-                    if self.shouldBeRemoved(value: data.value() + adjust, wordCount: data.ruby.count) {
-                        continue
-                    }
-                    dynamicDicdata[depth, default: []].append(data.adjustedData(adjust))
+            let firstSearch = dynamicallySearched.insert(characters).inserted
+            if firstSearch {
+                for (depth, dicdata) in result.dicdata {
+                    dynamicDicdata[depth, default: []].append(contentsOf: dicdata)
                 }
             }
             if !state.dynamicUserDictionary.isEmpty {
@@ -369,47 +368,58 @@ public final class DicdataStore {
                 let katakanaString = String(characters).toKatakana()
                 let dynamicUserDictResult = self.getMatchDynamicUserDict(katakanaString, state: state)
                 updated = updated || !dynamicUserDictResult.isEmpty
-                for data in dynamicUserDictResult {
-                    let depth = characters.endIndex
-                    if info.penalty.isZero {
-                        dynamicDicdata[depth, default: []].append(data)
-                    } else {
-                        let ratio = Self.penaltyRatio[data.lcid]
-                        let pUnit: PValue = Self.getPenalty(data: data) / 2   // 負の値
-                        let adjust = pUnit * info.penalty * ratio
-                        if self.shouldBeRemoved(value: data.value() + adjust, wordCount: Array(data.ruby).count) {
-                            continue
-                        }
-                        dynamicDicdata[depth, default: []].append(data.adjustedData(adjust))
-                    }
+                if firstSearch {
+                    dynamicDicdata[characters.endIndex, default: []].append(contentsOf: dynamicUserDictResult)
                 }
             }
             if availableMaxIndex < characters.endIndex - 1 {
                 // 到達不可能だったパスを通知
                 generator.setUnreachablePath(target: characters[...(availableMaxIndex + 1)])
             }
-            if updated {
+            // The search makes progress on a reading once; another path to
+            // the same reading (one ending elsewhere) is recorded as well
+            if updated || matchedStrings.contains(characters) {
                 stringToInfo.append((characters, info))
+                matchedStrings.insert(characters)
             }
         }
         let minCount = stringToInfo.map {$0.0.count}.min() ?? 0
-        return (
-            Dictionary(
-                stringToInfo,
-                uniquingKeysWith: { (lhs, rhs) in
-                    if lhs.penalty < rhs.penalty {
-                        return lhs
-                    } else if lhs.penalty == rhs.penalty {
-                        return switch (lhs.endIndex, rhs.endIndex) {
-                        case (.input, .input), (.surface, .surface): lhs // どっちでもいい
-                        case (.surface, .input): lhs  // surfaceIndexを優先
-                        case (.input, .surface): rhs  // surfaceIndexを優先
-                        }
-                    } else {
-                        return rhs
+        let best = Dictionary(
+            stringToInfo,
+            uniquingKeysWith: { (lhs, rhs) in
+                if lhs.penalty < rhs.penalty {
+                    return lhs
+                } else if lhs.penalty == rhs.penalty {
+                    return switch (lhs.endIndex, rhs.endIndex) {
+                    case (.input, .input), (.surface, .surface): lhs // どっちでもいい
+                    case (.surface, .input): lhs  // surfaceIndexを優先
+                    case (.input, .surface): rhs  // surfaceIndexを優先
                     }
+                } else {
+                    return rhs
                 }
-            ),
+            }
+        )
+        // Each reading at its best end, and a correction that reads the same
+        // but ends at another input index at that end as well: with n read
+        // as nn, ほけん ends after "hoken" as well as after "hokenn".
+        var infos = best.mapValues { [$0] }
+        for (characters, info) in stringToInfo where !info.penalty.isZero {
+            guard case let .input(end) = info.endIndex else {
+                continue
+            }
+            withMutableValue(&infos[characters, default: []]) { list in
+                if let index = list.firstIndex(where: { if case .input(end) = $0.endIndex { true } else { false } }) {
+                    if info.penalty < list[index].penalty {
+                        list[index] = info
+                    }
+                } else {
+                    list.append(info)
+                }
+            }
+        }
+        return (
+            infos,
             targetLOUDS.map {
                 ($0.key, $0.value.indicesInDepth(depth: minCount - 1 ..< .max))
             },
@@ -568,12 +578,14 @@ public final class DicdataStore {
                 return element
             }
             let ratio = Self.penaltyRatio[element.lcid]
-            let pUnit: PValue = Self.getPenalty(data: element) / 2   // 負の値
+            // By the reading's length, not the text's: a typo is in the keys,
+            // so 本 and ホン read from the same keys pay the same
+            let pUnit: PValue = -1 / PValue(max(1, rubyCount))   // 負の値
             let adjust = pUnit * penalty * ratio
             if self.shouldBeRemoved(value: element.value() + adjust, wordCount: rubyCount) {
                 return nil
             } else {
-                return element
+                return element.adjustedData(adjust)
             }
         }
 
@@ -590,11 +602,10 @@ public final class DicdataStore {
         latticeNodes.reserveCapacity(latticeNodes.count + additionalDicdata.count)
         for element in consume additionalDicdata {
             let rubyArray = Array(element.ruby)
-            guard let info = stringToInfo[rubyArray] else {
-                continue
-            }
-            if let element = penaltizedElementIfFeasible(consume element, rubyCount: rubyArray.count, penalty: info.penalty) {
-                appendNode(element, endIndex: info.endIndex)
+            for info in stringToInfo[rubyArray, default: []] {
+                if let element = penaltizedElementIfFeasible(copy element, rubyCount: rubyArray.count, penalty: info.penalty) {
+                    appendNode(element, endIndex: info.endIndex)
+                }
             }
         }
 
@@ -604,11 +615,10 @@ public final class DicdataStore {
             latticeNodes.reserveCapacity(latticeNodes.count + items.count)
             for element in consume items {
                 let rubyArray = Array(element.ruby)
-                guard let info = stringToInfo[rubyArray] else {
-                    continue
-                }
-                if let element = penaltizedElementIfFeasible(consume element, rubyCount: rubyArray.count, penalty: info.penalty) {
-                    appendNode(element, endIndex: info.endIndex)
+                for info in stringToInfo[rubyArray, default: []] {
+                    if let element = penaltizedElementIfFeasible(copy element, rubyCount: rubyArray.count, penalty: info.penalty) {
+                        appendNode(element, endIndex: info.endIndex)
+                    }
                 }
             }
         }

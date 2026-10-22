@@ -38,6 +38,28 @@ final class ConverterTests: XCTestCase {
         )
     }
 
+    /// Additional romaji corrections convert in context, and leave input
+    /// that reads well as typed alone.
+    func testAdditionalRoman2KanaTypoRules() async throws {
+        func best(_ input: String, rules: [Roman2KanaTypoRule]) -> String? {
+            let converter = KanaKanjiConverter.withDefaultDictionary()
+            converter.setAdditionalRoman2KanaTypoRules(rules)
+            var c = ComposingText()
+            c.insertAtCursorPosition(input, inputStyle: .roman2kana)
+            if c.convertTarget.last == "n" {
+                c.insertAtCursorPosition([.init(piece: .compositionSeparator, inputStyle: .roman2kana)])
+            }
+            return converter.requestCandidates(c, options: requestOptions()).mainResults.first?.text
+        }
+        let singleN = [Roman2KanaTypoRule(typed: "n", intended: "nn", weight: 3.5)]
+        XCTAssertEqual(best("geninhafumeidesu", rules: singleN), "原因は不明です")
+        XCTAssertEqual(best("hokennikanyuusuru", rules: singleN), "保険に加入する")
+        XCTAssertEqual(best("onnanohitogakita", rules: singleN), "女の人が来た")
+        XCTAssertEqual(best("konawomazeru", rules: singleN), "粉を混ぜる")
+        XCTAssertEqual(best("naniwosuru", rules: singleN), "何をする")
+        XCTAssertNotEqual(best("geninhafumeidesu", rules: []), "原因は不明です")
+    }
+
     /// Predictions are marked as such, but not a word read just as typed,
     /// which converts the input.
     func testPredictionCandidatesAreMarked() async throws {
