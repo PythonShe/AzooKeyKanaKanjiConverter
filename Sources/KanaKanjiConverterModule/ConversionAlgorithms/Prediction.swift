@@ -107,7 +107,10 @@ extension Kana2Kanji {
                 value: newValue,
                 composingCount: composingCount,
                 lastMid: includeMMValueCalculation ? data.mid : lastMid,
-                data: nodedata
+                data: nodedata,
+                // 入力どおりに読む語は予測ではなく変換
+                // A word read just as typed is a conversion of the input
+                isPrediction: data.ruby != lastRuby
             )
             // カウントがオーバーしそうな場合は除去する
             if result.count >= N_best {

@@ -38,6 +38,25 @@ final class ConverterTests: XCTestCase {
         )
     }
 
+    /// Predictions are marked as such, but not a word read just as typed,
+    /// which converts the input.
+    func testPredictionCandidatesAreMarked() async throws {
+        let converter = KanaKanjiConverter.withDefaultDictionary()
+        converter.importDynamicUserDictionary([DicdataElement(word: "数具", ruby: "スグ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)])
+        var options = requestOptions()
+        options.requireJapanesePrediction = true
+        var c = ComposingText()
+        c.insertAtCursorPosition("sugu", inputStyle: .roman2kana)
+        let results = converter.requestCandidates(c, options: options).mainResults
+        XCTAssertEqual(results.first { $0.text == "数具" }?.isPrediction, false)
+        XCTAssertTrue(results.filter(\.isPrediction).allSatisfy { $0.rubyCount > 2 })
+        var d = ComposingText()
+        d.insertAtCursorPosition("arigatougoza", inputStyle: .roman2kana)
+        let predicted = converter.requestCandidates(d, options: options).mainResults
+        XCTAssertEqual(predicted.first { $0.text == "ありがとうござい" }?.isPrediction, true)
+        XCTAssertEqual(predicted.first { $0.text == "ありがとうござ" }?.isPrediction, false)
+    }
+
     func testFullConversion() async throws {
         do {
             let converter = KanaKanjiConverter.withDefaultDictionary()

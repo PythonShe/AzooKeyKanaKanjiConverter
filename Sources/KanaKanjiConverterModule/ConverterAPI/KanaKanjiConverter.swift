@@ -265,7 +265,8 @@ public final class KanaKanjiConverter {
                         value: value,
                         composingCount: .inputCount(inputData.input.count),
                         lastMid: MIDData.一般.mid,
-                        data: data
+                        data: data,
+                        isPrediction: true
                     )
                     result.append(candidate)
                     value += delta
@@ -299,7 +300,8 @@ public final class KanaKanjiConverter {
                         value: value,
                         composingCount: .inputCount(inputData.input.count),
                         lastMid: MIDData.一般.mid,
-                        data: data
+                        data: data,
+                        isPrediction: true
                     )
                     result.append(candidate)
                     value += delta

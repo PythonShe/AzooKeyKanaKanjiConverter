@@ -165,7 +165,13 @@ public struct Candidate: Sendable {
     /// 学習対象かどうか（ユーザショートカット等は除外する）
     public var isLearningTarget: Bool
 
-    public init(text: String, value: PValue, composingCount: ComposingCount, lastMid: Int, data: [DicdataElement], actions: [CompleteAction] = [], inputable: Bool = true, isLearningTarget: Bool = true) {
+    /// 予測変換の候補かどうか。入力より先まで読む候補で、誤り訂正で読みが入力より長くなった候補とは`rubyCount`では区別できない。
+    /// Whether the candidate is a prediction, reading further than the input;
+    /// `rubyCount` cannot tell it from a conversion whose typo correction
+    /// reads the input longer.
+    public var isPrediction: Bool
+
+    public init(text: String, value: PValue, composingCount: ComposingCount, lastMid: Int, data: [DicdataElement], actions: [CompleteAction] = [], inputable: Bool = true, isLearningTarget: Bool = true, isPrediction: Bool = false) {
         self.text = text
         self.value = value
         self.composingCount = composingCount
@@ -175,6 +181,7 @@ public struct Candidate: Sendable {
         self.inputable = inputable
         self.rubyCount = self.data.reduce(into: 0) { $0 += $1.ruby.count }
         self.isLearningTarget = isLearningTarget
+        self.isPrediction = isPrediction
     }
     /// 後から`action`を追加した形を生成する関数
     /// - parameters:
