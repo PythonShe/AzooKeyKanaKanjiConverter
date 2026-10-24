@@ -75,6 +75,18 @@ public final class KanaKanjiConverter {
         return (mode, baseModel, personalModel)
     }
 
+    /// Takes over the Zenzai model another converter has loaded, ending its
+    /// session there. A model can then be loaded off the main thread on a
+    /// converter of its own and serve one that shares a preloaded dictionary.
+    public func takeZenzaiModel(from other: KanaKanjiConverter) {
+        other.stopComposition()
+        self.stopComposition()
+        self.zenz = other.zenz
+        self.zenzStatus = other.zenzStatus
+        other.zenz = nil
+        other.zenzStatus = ""
+    }
+
     package func getModel(modelURL: URL) -> Zenz? {
         if let model = self.zenz, model.resourceURL == modelURL {
             self.zenzStatus = "load \(modelURL.absoluteString)"
