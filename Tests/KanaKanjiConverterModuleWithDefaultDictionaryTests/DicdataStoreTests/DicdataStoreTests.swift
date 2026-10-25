@@ -449,6 +449,27 @@ final class DicdataStoreTests: XCTestCase {
         }
     }
 
+    /// A user word read past every prefix the dictionary has (キリタニ for
+    /// 桐谷) is still found when the lookup's end is open, as when a whole
+    /// lattice is built at once, which Zenzai always does.
+    func testDynamicUserDictWordLongerThanTheDictionaryPrefixes() throws {
+        let dicdataStore = DicdataStore.withDefaultDictionary()
+        let state = dicdataStore.prepareState()
+        state.importDynamicUserDictionary([
+            DicdataElement(word: "桐谷奏", ruby: "キリタニカナデ", lcid: CIDData.固有名詞.cid, rcid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)
+        ])
+        var c = ComposingText()
+        c.insertAtCursorPosition("キリタニカナデサン", inputStyle: .direct)
+        let result = dicdataStore.lookupDicdata(
+            composingText: c,
+            inputRange: (0, nil),
+            surfaceRange: (0, nil),
+            needTypoCorrection: false,
+            state: state
+        )
+        XCTAssertTrue(result.contains(where: {$0.data.word == "桐谷奏"}))
+    }
+
     func testPossibleNexts() throws {
         let possibleNexts = InputStyleManager.shared.table(for: .defaultRomanToKana).possibleNexts
         XCTAssertEqual(Set(possibleNexts["f", default: []]).symmetricDifference(["ファ", "フィ", "フ", "フェ", "フォ", "フャ", "フュ", "フョ", "フゥ", "ッf"]), [])
