@@ -340,7 +340,9 @@ final class ZenzContext {
         }
         var conditions: [String] = []
         // ユーザ辞書の内容がある場合はこれを条件に追加
-        if !userDictionaryPrompt.isEmpty {
+        // Only zenz-v2 was trained with this condition; v3 has no tag for it
+        // and reads it as stray text before the input
+        if !userDictionaryPrompt.isEmpty, case .v2 = versionDependentConfig {
             conditions.append("辞書:\(userDictionaryPrompt)")
         }
         // プロフィールがある場合はこれを条件に追加
