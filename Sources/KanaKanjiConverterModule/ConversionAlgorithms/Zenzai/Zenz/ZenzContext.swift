@@ -444,6 +444,29 @@ final class ZenzContext {
         }
 
         let tokens = prompt_tokens + candidate_tokens
+        // A word the user taught (learned or from the user dictionary) is
+        // judged by its first token and then kept as written: the model
+        // decides whether the word fits, not how it is spelled midway.
+        var userWordRanges: [Range<Int>] = []
+        if candidate.data.map(\.word).joined() == candidate.text {
+            var offset = 0
+            for item in candidate.data {
+                let length = self.preprocessText(text: item.word).utf8.count
+                if !item.metadata.isDisjoint(with: [.isLearned, .isFromUserDictionary]) {
+                    userWordRanges.append(offset ..< offset + length)
+                }
+                offset += length
+            }
+        }
+        // Where each candidate token starts, in bytes of the candidate.
+        var candidateTokenOffsets: [Int] = []
+        if !userWordRanges.isEmpty {
+            var offset = 0
+            for token in candidate_tokens {
+                candidateTokenOffsets.append(offset)
+                offset += token_to_piece(token: token).count
+            }
+        }
 
         // すでにprefixConstraintを満たしている部分については、計算をしない
         let startOffset = prompt_tokens.count - 1 + addressed_tokens.count
@@ -454,7 +477,7 @@ final class ZenzContext {
         let n_vocab = llama_vocab_n_tokens(vocab)
         let is_learned_token: [(isLearned: Bool, priority: Float)] = Array(repeating: (false, 0), count: prompt_tokens.count) + candidate.data.flatMap {
             // priorityは文字数にする→文字数が長いほど優先される
-            Array(repeating: ($0.metadata.contains(.isLearned), logf(getLearningPriority(data: $0))), count: self.tokenize(text: $0.word, add_bos: false).count)
+            Array(repeating: (!$0.metadata.isDisjoint(with: [.isLearned, .isFromUserDictionary]), logf(getLearningPriority(data: $0))), count: self.tokenize(text: $0.word, add_bos: false).count)
         }
 
         var score: Float = 0
@@ -522,8 +545,11 @@ final class ZenzContext {
                 debug("Max Item could not be found for unknown reason")
                 return .error
             }
+            let continuesUserWord = candidateTokenOffsets.indices.contains(i - prompt_tokens.count) && userWordRanges.contains {
+                $0.lowerBound < candidateTokenOffsets[i - prompt_tokens.count] && candidateTokenOffsets[i - prompt_tokens.count] < $0.upperBound
+            }
             // ここで最も良い候補であったかをチェックする
-            if maxItem.token != token_id {
+            if maxItem.token != token_id, !continuesUserWord {
                 if maxItem.token == llama_vocab_eos(vocab) {
                     let cchars: [CChar] = tokens[..<i].reduce(into: []) {
                         $0.append(contentsOf: token_to_piece(token: $1))
@@ -545,7 +571,7 @@ final class ZenzContext {
                         return .fixRequired(prefixConstraint: cchars.dropFirst(prompt.utf8.count).map(UInt8.init))
                     }
                 }
-            } else if !tokenHeap.isEmpty {
+            } else if !continuesUserWord, !tokenHeap.isEmpty {
                 tokenHeap.removeMax()
                 let prefix = tokens[..<i].reduce(into: []) {
                     $0.append(contentsOf: token_to_piece(token: $1))
